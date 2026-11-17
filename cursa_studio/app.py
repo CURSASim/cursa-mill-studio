@@ -37,6 +37,7 @@ ERR_HINT = {
     'ALARM:1': 'hard limit hit: release the switch by hand, Reset, then Home',
     'ALARM:2': 'move would exceed soft limits',
     'ALARM:3': 'reset while moving: position may be lost. Home again (or Unlock) and re-zero X/Y',
+    'ALARM:4': 'probe read CLOSED at the start of a touch (usually a noise spike): retried automatically',
     'ALARM:6': 'homing failed: is the E-STOP pressed? Twist it out, Reset, Home',
     'ALARM:8': 'homing failed: switch not found',
     'ALARM:9': 'homing failed: switch not found',
@@ -181,7 +182,8 @@ def make_sim():
         def close(self):
             pass
 
-    s = SimGrbl(backlash=0.05)
+    nz = float(os.environ.get('CURSA_SIM_NOISE', '0') or 0)     # e.g. 0.15 to rehearse a noisy probe line
+    s = SimGrbl(backlash=0.05, noise_early=nz, noise_status=nz / 5)
     s.mount(1)
     s.m = [-180.0, -120.0, -38.0 + 12.0]      # bit 12 mm above the copper corner, X/Y already zeroed there
     return s
@@ -459,6 +461,7 @@ class Machine(threading.Thread):
         nx = max(2, math.ceil((bounds[2] - bounds[0]) / spec['grid']) + 1)
         ny = max(2, math.ceil((bounds[3] - bounds[1]) / spec['grid']) + 1)
         total = nx * ny
+        self.post(('log', f'Mapping {nx} x {ny} = {total} points (each point: fast touch + 2 confirming touches)...'))
         orig = cj.Leveler.touch
         count = [0]
 
@@ -478,6 +481,9 @@ class Machine(threading.Thread):
         path = os.path.join(RUNS, time.strftime('%Y%m%d_%H%M%S') + f'_{tag}.heightmap.json')
         cj._save(hm, list(ref), path)
         self.post(('map', hm.xs, hm.ys, [list(map(float, r)) for r in hm.z], hm.range))
+        if self.g.noise_events:
+            self.post(('log', f'Probe noise filtered: {self.g.noise_events} events so far (readings re-checked). Many '
+                              f'events = route/shorten the probe wires or add a 100 nF capacitor on the probe input.'))
         verdict = 'GOOD' if hm.range < 0.2 else 'OK (compensated)'
         self.post(('log', f'Height map: range {hm.range * 1000:.0f} um ({verdict}). Saved {path}'))
         return hm
@@ -645,6 +651,7 @@ class App:
         self.pause_btn = ttk.Button(top, text='Pause', command=self.pause, takefocus=0, width=9)
         self.pause_btn.pack(side='right', padx=4, ipady=6)
         ttk.Button(top, text='Help', command=self.help, takefocus=0).pack(side='right', padx=2)
+        ttk.Button(top, text='Log', command=self.open_folder, takefocus=0).pack(side='right', padx=2)
 
         body = ttk.Frame(r)
         body.pack(side='top', fill='both', expand=True, padx=8)
@@ -793,6 +800,13 @@ class App:
 
     # ------------------------------------------------------------------ helpers
     def log(self, text, tag=None):
+        try:
+            with open(os.path.join(HOME, 'log.txt'), 'a', encoding='utf-8') as fh:
+                stamp = time.strftime('%Y-%m-%d %H:%M:%S')
+                for line in str(text).rstrip('\n').split('\n'):
+                    fh.write(f'{stamp}  {line}\n')
+        except Exception:
+            pass
         t = self.log_txt
         t.configure(state='normal')
         for line in str(text).rstrip('\n').split('\n'):
@@ -1060,6 +1074,15 @@ class App:
         if 0 <= i < len(self.steps):
             self.prog_lbl.configure(text=f'Step {i + 1}/{len(self.steps)}: {self.steps[i][2]}')
 
+    def open_folder(self):
+        try:
+            if sys.platform == 'win32':
+                os.startfile(HOME)
+            else:
+                messagebox.showinfo(APP, HOME)
+        except Exception as e:
+            messagebox.showerror(APP, str(e))
+
     def offer_shortcut(self, ask=True):
         self.s['shortcut_asked'] = True
         save_settings(self.s)
@@ -1252,6 +1275,7 @@ class App:
             line = item[1]
             self.log(hint(line), 'err' if line.startswith(('ALARM', 'error', '[MSG:Estop')) else 'rx')
         elif k == 'error':
+            self.last_error = item[1]
             self.log(item[1], 'err')
             self.flash(item[1][:160])
         elif k == 'connected':
@@ -1277,6 +1301,7 @@ class App:
                 self.prog['value'] = 0
                 self.time_lbl.configure(text='')
         elif k == 'job_start':
+            self.last_error = ''
             self.job_t0 = time.time()
             self.start_btn.state(['disabled'])
             self.test_btn.state(['disabled'])
@@ -1287,8 +1312,9 @@ class App:
             self.paused = False
             self.pause_btn.configure(text='Pause')
             if self.step_idx < len(self.steps) - 1:
-                self.clear_prompt('Job stopped. Fix the cause, then START JOB again (it re-probes from the start).',
-                                  '#ff6e6e')
+                why = getattr(self, 'last_error', '') or 'stopped by you (STOP / cancel)'
+                self.clear_prompt(f'JOB STOPPED: {why}\n\nFix the cause, then START JOB again (it re-probes from the '
+                                  f'start). Full log: {os.path.join(HOME, "log.txt")}', '#ff6e6e')
         elif k == 'done':
             self.mark_step(len(self.steps) - 1)
             self.step_labels[-1].configure(text='✓  Done', fg='#3ddc84')

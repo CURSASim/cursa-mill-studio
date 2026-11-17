@@ -83,3 +83,18 @@ def test_preview_parser(files):
     assert len(plunges) == 6
     steps = plan_steps({'traces': files[0], 'holes': files[1]})
     assert [k for _, k, _ in steps].count('circuit') == 2 and steps[-1][1] == 'done'
+
+
+def test_noisy_probe(files, monkeypatch, tmp_path):
+    """Noise: 15 % of probe moves trigger early (read 0.03-0.4 mm high), 3 % false 'closed' / ALARM:4."""
+    monkeypatch.chdir(tmp_path)
+    f = FakeGrbl(backlash=0.2, noise_early=0.15, noise_status=0.03, seed=7)
+    f.mount(1)
+    f.m = [-180.0, -120.0, -38 + 15]
+    monkeypatch.setattr(core.Leveler, 'circuit_test', lambda self: None)
+    rc = core.main(['job', files[0], files[1]], transport=f, ui=AutoUI(f))
+    assert rc == 0
+    assert f.noise_count > 5                          # the noise really happened
+    d1 = [c[2] for c in f.cuts[1]]
+    assert 0.08 < min(d1) and max(d1) < 0.12          # depths still right
+    assert f.rapid_crash == 0 and f.cut_while_stopped == 0

@@ -1,11 +1,11 @@
 """Simulated GRBL 1.1 + 3018 + warped copper blank, for dry runs of the runner with injected faults."""
-import math, re
+import math, random, re
 from collections import deque
 
 
 class FakeGrbl:
     def __init__(self, blank=(102.0, 71.0), g54=(-180.0, -120.0), events=(), seed_tool_off=(0.0, 4.3),
-                 backlash=0.0):
+                 backlash=0.0, noise_early=0.0, noise_status=0.0, seed=1):
         self.out = deque()
         self.t = 0.0
         self.m = [0.0, 0.0, -1.0]                     # machine position
@@ -25,6 +25,10 @@ class FakeGrbl:
         self.spindle = False
         self.cut_while_stopped = 0
         self.bl = backlash
+        self.noise_early = noise_early        # chance a probe move triggers early (reads high)
+        self.noise_status = noise_status      # chance a status report / probe start sees a false 'closed'
+        self.rng = random.Random(seed)
+        self.noise_count = 0
         self.phys = [0.0, 0.0]                       # table X/Y (machine frame) after backlash
 
     # ---------------------------------------------------------------- world
@@ -91,6 +95,8 @@ class FakeGrbl:
             if self.touch_pulse > 0:
                 self.touch_pulse -= 1
                 touching = self.touch_pulse > 2
+            if not touching and self.noise_status and self.rng.random() < self.noise_status:
+                touching = True
             if touching:
                 pn = '|Pn:P'
             st = 'Alarm' if self.alarm else 'Idle'
@@ -194,12 +200,20 @@ class FakeGrbl:
         s = self.surface(w[0], w[1])
         if self.tool_off is None:
             raise RuntimeError('probe with no tool mounted')
-        if s is not None and self.circuit and self.tip() <= s:
+        if (s is not None and self.circuit and self.tip() <= s) or \
+                (self.noise_status and self.rng.random() < self.noise_status):
             self.alarm = True
+            self.noise_count += 1
             self.out.append('ALARM:4')
+            self.ok()
             return
         z_tgt = (words['Z'] + self.g54[2]) if self.abs else self.m[2] + words['Z']
         contact_mz = (s - self.tool_off) if (s is not None and self.circuit) else None
+        if contact_mz is not None and self.noise_early and self.rng.random() < self.noise_early:
+            early = contact_mz + self.rng.uniform(0.03, 0.4)
+            if early < self.m[2]:
+                contact_mz = early
+                self.noise_count += 1
         if contact_mz is not None and contact_mz >= z_tgt:
             self.t += abs(self.m[2] - contact_mz) / words.get('F', self.feed) * 60
             self.m[2] = contact_mz

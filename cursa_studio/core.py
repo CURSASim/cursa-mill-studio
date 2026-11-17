@@ -26,6 +26,7 @@ class SerialTransport:
         self.s = serial.Serial(port, baud, timeout=0.1)
         self.q = queue.Queue()
         self._run = True
+        self._wlock = threading.Lock()
         threading.Thread(target=self._reader, daemon=True).start()
 
     @staticmethod
@@ -62,7 +63,8 @@ class SerialTransport:
                 self.q.put(line.decode(errors='replace').strip())
 
     def write(self, data: bytes):
-        self.s.write(data)
+        with self._wlock:                 # GUI '?' polls and streamed lines come from different threads
+            self.s.write(data)
 
     def readline(self, timeout):
         try:
@@ -219,13 +221,44 @@ class Grbl:
         self.cmd('$#')
         return dict(self.last_offsets)
 
+    noise_events = 0
+
+    def wait_for_open_probe(self, settle=1.5):
+        """The 3018 probe input picks up noise. A single 'closed' reading is not a short: wait up to `settle` s for
+        the input to read open on 3 polls in a row; only a probe that STAYS closed is an error."""
+        st = self.wait_idle()
+        if not st['probe']:
+            return
+        self.noise_events += 1
+        t0, open_run = time.time(), 0
+        while time.time() - t0 < settle:
+            if self.sim_clock is None:
+                time.sleep(0.05)
+            open_run = 0 if self.query()['probe'] else open_run + 1
+            if open_run >= 3:
+                return
+        raise GrblError('probe input stays CLOSED before probing: the bit is touching the copper, the two clips '
+                        'touch each other, or the probe wire is shorted')
+
+    def recover_probe_alarm(self):
+        """After ALARM:4 (probe read closed at the start of G38.x, usually a noise spike): collect the trailing
+        replies, unlock and continue. Position is kept by GRBL for this alarm."""
+        t0 = time.time()
+        while time.time() - t0 < 0.6:
+            try:
+                self.pump(0.05)
+            except GrblError:
+                pass
+        self.pending.clear()
+        self.alarm = None
+        self.noise_events += 1
+        self.cmd('$X')
+        self.cmd('G90')
+
     def probe(self, z_target_work, feed):
         """G38.3 to a work Z. Returns the contact MACHINE Z (GRBL reports PRB in machine coordinates) or None.
         G38.3 never alarms on a miss."""
-        st = self.wait_idle()
-        if st['probe']:
-            raise GrblError('probe input already closed before probing: the tip is touching the copper or the '
-                            'probe wires are shorted')
+        self.wait_for_open_probe()
         self.prb = None
         self.cmd(f'G38.3 Z{z_target_work:.4f} F{feed:g}', timeout=120)
         self.wait_idle()
@@ -463,37 +496,113 @@ class Leveler:
                 time.sleep(0.05)
         raise GrblError('circuit test failed: the probe input never closed — check both clips and the probe plug')
 
+    def _rel_probe(self, dist, feed):
+        """Relative G38.3 down by `dist`. Returns contact machine Z or None (no contact). Retries noise alarms."""
+        for attempt in range(4):
+            try:
+                self.g.wait_for_open_probe()
+                self.g.prb = None
+                self.g.cmd('G91')
+                self.g.cmd(f'G38.3 Z-{dist:.3f} F{feed:g}', timeout=dist / feed * 60 + 60)
+                self.g.cmd('G90')
+                self.g.wait_idle()
+                t0 = time.time()
+                while self.g.prb is None and time.time() - t0 < 2:
+                    self.g.pump(0.05)
+                if not self.g.prb:
+                    raise GrblError('no PRB report')
+                return self.g.prb[2] if self.g.prb[3] else None
+            except GrblError as e:
+                m = str(e)
+                if not ('ALARM:4' in m or ('in alarm' in m and self.g.alarm in (None, 'ALARM:4'))) or attempt == 3:
+                    raise
+                print('  probe noise (ALARM:4) - unlocking and retrying')
+                self.g.recover_probe_alarm()
+                self.g.cmd('G90')
+
     def touch_blind(self, x, y, max_drop=25.0):
-        """From the current height: move over (x, y), seek down, back off, fine touch. Returns machine Z."""
+        """From the current (unknown) height: move over (x, y), seek down at most max_drop, then fine touches until
+        the lowest reading is confirmed twice (noise reads high). Returns machine Z of the copper."""
         self.g.cmd(f'G0 X{x:.3f} Y{y:.3f}')
-        self.g.wait_idle()
-        for dist, feed in ((max_drop, self.fs), (0.6, self.ff)):
-            self.g.prb = None
-            self.g.cmd('G91')
-            self.g.cmd(f'G38.3 Z-{dist:.3f} F{feed:g}', timeout=120)   # 25 mm at F60 = 25 s + accel
-            self.g.cmd('G90')
-            self.g.wait_idle()
-            t0 = time.time()
-            while self.g.prb is None and time.time() - t0 < 2:
-                self.g.pump(0.05)
-            if not self.g.prb or not self.g.prb[3]:
-                raise GrblError(f'no copper within {dist} mm below — clip off, bit too high, or not over the board')
-            zc = self.g.prb[2]
-            if dist == max_drop:
+        st = self.g.wait_idle()
+        start = st['mpos'][2]
+        vals = []
+        for _ in range(10):
+            if not vals:
+                left = max_drop - (start - self.g.status.get('mpos', (0, 0, start))[2])
+                if left <= 0.05:
+                    break
+                zc = self._rel_probe(left, self.fs)               # fast seek
+                if zc is None:
+                    break
                 self.g.cmd('G91'); self.g.cmd('G0 Z0.3'); self.g.cmd('G90')
-        self.g.cmd('G91'); self.g.cmd('G0 Z1'); self.g.cmd('G90')
-        return zc
+                zf = self._rel_probe(1.0, self.ff)                # fine touch below the seek contact
+                if zf is None:                                    # seek stopped early (noise): keep seeking
+                    continue
+                vals.append(zf)
+            else:
+                self.g.cmd('G91'); self.g.cmd('G0 Z0.2'); self.g.cmd('G90')
+                zf = self._rel_probe(1.0, self.ff)
+                if zf is None:
+                    raise GrblError('lost the copper during the Z0 confirm touch: check the clips')
+                vals.append(zf)
+            c = self.confirmed_low(vals)
+            if c is not None:
+                self.g.cmd('G91'); self.g.cmd('G0 Z1'); self.g.cmd('G90')
+                return c
+        if vals:
+            raise GrblError(f'Z0 touches disagree ({", ".join(f"{v:.3f}" for v in vals)}): the probe signal is noisy')
+        raise GrblError(f'no copper within {max_drop:g} mm below: clip off, bit too high, or not over the board')
+
+    fine_feed = 20.0
+    agree = 0.015            # two fine touches must agree within this (mm)
+
+    def confirmed_low(self, vals):
+        """Noise can only make a touch read HIGH (the probe stops early), never low. So the copper is the LOWEST
+        reading, accepted once a second reading agrees with it. Returns that value or None."""
+        lo = min(vals)
+        near = [v for v in vals if v - lo <= self.agree]
+        return sum(near) / len(near) if len(near) >= 2 else None
+
+    def _probe_retry(self, target_work, feed):
+        for attempt in range(4):
+            try:
+                return self.g.probe(target_work, feed)
+            except GrblError as e:
+                m = str(e)
+                probe_alarm = 'ALARM:4' in m or ('in alarm' in m and self.g.alarm in (None, 'ALARM:4'))
+                if not probe_alarm or attempt == 3:
+                    raise
+                print('  probe noise (ALARM:4) - unlocking and retrying')
+                self.g.recover_probe_alarm()
 
     def touch(self, x, y, z_est, travel):
+        """Fast touch to find the copper, then fine touches from 0.2 mm above until two agree. A noise spike makes
+        a touch read HIGH (early trigger), so a single reading is never trusted."""
         self.g.cmd(f'G0 Z{travel:.3f}')
         self.g.cmd(f'G0 X{x:.3f} Y{y:.3f}')
         for below in (1.0, 3.0):
             self.g.cmd(f'G0 Z{z_est + 1.0:.3f}')
-            zm = self.g.probe(z_est - below, self.fm)
-            if zm is not None:
-                z = zm - self.z0
-                self.g.cmd(f'G0 Z{z + 1.0:.3f}')
-                return z
+            target = z_est - below
+            zm = self._probe_retry(target, self.fm)
+            if zm is None:
+                continue
+            vals = []
+            for _ in range(7):
+                self.g.cmd(f'G0 Z{min([zm] + vals) - self.z0 + 0.2:.4f}')
+                zf = self._probe_retry(target, self.fine_feed)
+                if zf is None:
+                    break
+                vals.append(zf)
+                c = self.confirmed_low(vals)
+                if c is not None:
+                    z = c - self.z0
+                    self.g.cmd(f'G0 Z{z + 1.0:.3f}')
+                    return z
+            if vals:
+                raise GrblError(f'probe readings disagree at X{x:.1f} Y{y:.1f} ({", ".join(f"{v - self.z0:.3f}" for v in vals)}): '
+                                'the probe signal is noisy. Shorten/twist the probe wires, keep them away from the '
+                                'stepper cables, add a 100 nF capacitor across the probe input')
         raise GrblError(f'no copper at X{x:.1f} Y{y:.1f} — clip off or the point is off the copper')
 
     def zero_xy(self):
