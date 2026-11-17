@@ -32,7 +32,7 @@ Built for the **Genmitsu 3018-PROVer V2** (GRBL 1.1). Should work on any GRBL 1.
 2. Open Command Prompt and run once:
 
    ```
-   py -m pip install https://github.com/<you>/cursa-mill-studio/archive/refs/heads/main.zip
+   py -m pip install https://github.com/CURSASim/cursa-mill-studio/archive/refs/heads/main.zip
    ```
 
 3. Start it:
