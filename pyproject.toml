@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cursa-mill-studio"
+version = "1.0.0"
+description = "PCB isolation milling for GRBL desktop CNCs: keyboard jogging, probe auto-levelling (height map), guided two-bit job with bit-change re-probing."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+dependencies = ["numpy>=1.21", "pyserial>=3.5"]
+keywords = ["cnc", "grbl", "pcb", "isolation milling", "autolevel", "height map", "3018"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Environment :: X11 Applications :: Tk",
+  "Topic :: Scientific/Engineering :: Electronic Design Automation (EDA)",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.gui-scripts]
+cursa-studio = "cursa_studio.app:main"
+
+[project.scripts]
+cursa-mill = "cursa_studio.core:main"
+
+[tool.setuptools]
+packages = ["cursa_studio"]
