@@ -19,9 +19,10 @@ Built for the **Genmitsu 3018-PROVer V2** (GRBL 1.1). Should work on any GRBL 1.
   automatic refinement, stops if the blank is not seated). Every cutting move is corrected for the copper height
   while streaming.
 - **Guided job**, each spindle start behind a dual confirm (tick + GO):
-  1. Load the carving bit, clip the probe → circuit check → Z0 + height map
+  1. Load the carving bit, copper clip on → circuit check (touch the free lead to the copper) →
+     clip the lead on the bit → Z0 + height map
   2. Remove the clips → mill traces
-  3. Swap to the drill bit, clip the probe → circuit check → Z0 re-found + height map again
+  3. Swap to the drill bit → circuit check → clip the lead on the bit → Z0 re-found + height map again
   4. Remove the clips → drill holes → cut-out
 - **Backlash compensation** in software (GRBL 1.1 has none), set from a test coupon.
 - **Simulator**: choose `Simulator` as the port to rehearse the whole flow with a fake machine and a warped blank.

@@ -483,14 +483,16 @@ class Leveler:
             raise GrblError('probe input reads CLOSED with nothing touching: the clip leads are shorted together')
 
     def circuit_test(self):
-        self.ui.ask('CIRCUIT TEST: ground clip on the bit, copper clip on the board. Press Enter, then touch the two '
-                    'clips together for a second.')
+        self.ui.ask('CIRCUIT TEST: copper clip on the board, the other probe lead FREE. Press Enter, then touch the '
+                    'free lead to the copper clip for a second.')
         t0, seen = time.time(), False
         while time.time() - t0 < 60:
             p = self.g.query()['probe']
             seen |= p
             if seen and not p:
                 print('circuit test OK')
+                self.ui.confirm('Circuit OK. Now clip the free probe lead onto the BIT (bit 5-15 mm above the copper). '
+                                'The machine moves down to touch the copper as soon as you confirm.')
                 return
             if self.g.sim_clock is None:
                 time.sleep(0.05)
@@ -760,10 +762,9 @@ def run_job(a, g, lv, ui):
             g.cmd('M5')
             if getattr(lv, 'z0', None) is not None:      # only once Z is known; before that, never move Z blind
                 g.cmd('G0 Z10')
-            ui.confirm(f'BIT for {name}: put it in now (shank fully in, collet tight, stick-out >= 10 mm). Then clip the '
-                       'ground lead on the bit, copper clip on the board, bit 10-20 mm above the copper.')
-            if k == 0:
-                lv.circuit_test()
+            ui.confirm(f'BIT for {name}: put it in now (shank fully in, collet tight, stick-out >= 10 mm). Copper clip on '
+                       'the board, other probe lead free for the circuit test, bit 10-20 mm above the copper.')
+            lv.circuit_test()
             lv.set_z0_here(lv.touch_blind(*ref))
             print(f'Z0 set on the copper at X{ref[0]:.2f} Y{ref[1]:.2f} with this bit; mapping...')
             hm = lv.grid(bounds, a.grid)

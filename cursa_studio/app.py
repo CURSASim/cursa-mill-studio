@@ -1,8 +1,9 @@
 """CURSA Mill Studio — PCB milling control for the Genmitsu 3018-PROVer V2 (GRBL 1.1).
 
 One window: connect, jog every axis with the keyboard, pick the traces / holes / cut-out files, then one guided job:
-load carving bit + clips -> circuit check -> Z0 + height map -> remove clips -> mill traces -> swap to drill + clips ->
-circuit check -> Z0 + height map again -> remove clips -> drill holes (+ cut-out). Every spindle start is a dual confirm.
+load carving bit + copper clip -> circuit check -> clip lead on the bit -> Z0 + height map -> remove clips -> mill traces
+-> swap to drill -> circuit check -> clip lead on the bit -> Z0 + height map again -> remove clips -> drill holes
+(+ cut-out). Every probing start and every spindle start is a dual confirm.
 
 Keys: arrows = X / Y, Z = Z up, X = Z down (also PgUp / PgDn), SPACE = step 10 / 1 / 0.1 mm, ESC = STOP.
 Machine control reuses cursa_job.py (character-counting streaming, G38.3 probing, height map, backlash compensation).
@@ -94,13 +95,13 @@ def plan_steps(files):
     """files: dict role -> path. Returns [(group, key, text)] — shared by the GUI list and the machine thread."""
     steps = []
     if files.get('traces'):
-        steps += [('carve', 'load', 'Load CARVING bit + clip probe'), ('carve', 'circuit', 'Circuit check'),
-                  ('carve', 'level', 'Find Z0 + height map'), ('carve', 'clips', 'Remove probe clips'),
+        steps += [('carve', 'load', 'Load CARVING bit, copper clip on'), ('carve', 'circuit', 'Circuit check'),
+                  ('carve', 'clipon', 'Clip probe lead on the bit'), ('carve', 'level', 'Find Z0 + height map'), ('carve', 'clips', 'Remove probe clips'),
                   ('carve', 'cut:traces', 'Mill TRACES')]
     if files.get('holes') or files.get('cutout'):
         first = not steps
-        steps += [('drill', 'load', ('Load' if first else 'Swap to') + ' DRILL bit + clip probe'),
-                  ('drill', 'circuit', 'Circuit check'),
+        steps += [('drill', 'load', ('Load' if first else 'Swap to') + ' DRILL bit, copper clip on'),
+                  ('drill', 'circuit', 'Circuit check'), ('drill', 'clipon', 'Clip probe lead on the bit'),
                   ('drill', 'level', ('Find' if first else 'Re-find') + ' Z0 + height map'),
                   ('drill', 'clips', 'Remove probe clips')]
         if files.get('holes'):
@@ -351,8 +352,8 @@ class Machine(threading.Thread):
         if st.get('probe'):
             raise cj.GrblError('the PROBE light is already ON: the bit is touching the copper or the clips touch each '
                                'other. Lift the bit / separate the clips, then start again.')
-        self.post(('prompt', 'CIRCUIT CHECK: touch the two probe clips together for a second (or touch the copper '
-                             'clip to the bit). The PROBE light must turn green, then let go.', None, False))
+        self.post(('prompt', 'CIRCUIT CHECK: touch the free probe lead to the copper (or to the copper clip) for a '
+                             'second. The PROBE light must turn green, then let go.', None, False))
         if self.sim is not None:
             self.sim.touch_pulse = 6
         seen, t0 = False, time.time()
@@ -410,11 +411,14 @@ class Machine(threading.Thread):
             for gi, (bit, roles) in enumerate(groups):
                 self.next_step()
                 verb = 'Put' if gi == 0 else 'SWAP TO'
-                self.prompt(f'{verb} the {bit} in the collet (stick-out at least 10 mm, collet tight). Clip the probe: '
-                            f'one clip on the copper, one on the bit. Jog the bit 5-15 mm above the copper near X0 Y0 '
-                            f'(arrow keys / Z / X work now).', f'{bit.split(" (")[0]} loaded and probe clips attached')
+                self.prompt(f'{verb} the {bit} in the collet (stick-out at least 10 mm, collet tight). Put one probe '
+                            f'clip on the copper; keep the other probe lead FREE for the circuit check. Jog the bit '
+                            f'5-15 mm above the copper near X0 Y0 (arrow keys / Z / X work now).',
+                            f'{bit.split(" (")[0]} loaded, copper clip on')
                 self.next_step()
                 self.circuit_check()
+                self.next_step()
+                self.clip_on_prompt()
                 self.next_step()
                 hm = self.level(lv, bounds, ref, spec, tag=roles[0])
                 self.next_step()
@@ -488,14 +492,22 @@ class Machine(threading.Thread):
         self.post(('log', f'Height map: range {hm.range * 1000:.0f} um ({verdict}). Saved {path}'))
         return hm
 
+    def clip_on_prompt(self):
+        self.prompt('Circuit OK. Now clip the free probe lead onto the BIT. Check the bit is still 5-15 mm above the '
+                    'copper. The machine starts moving down to touch the copper as soon as you confirm.',
+                    'Probe lead is on the bit - start probing')
+
     def map_test(self, lv, spec):
         w, h = spec['copper_w'], spec['copper_h']
         bounds = (5.0, 5.0, w - 5.0, h - 5.0)
         self.next_step()
-        self.prompt('HEIGHT MAP TEST (nothing is cut). Clip the probe: one clip on the copper, one on the bit. Bit '
-                    '5-15 mm above the copper near X0 Y0.', 'Probe clips attached, bit above the copper')
+        self.prompt('HEIGHT MAP TEST (nothing is cut). Put one probe clip on the copper; keep the other probe lead FREE '
+                    'for the circuit check. Bit 5-15 mm above the copper near X0 Y0.', 'Copper clip on, bit above the '
+                    'copper')
         self.next_step()
         self.circuit_check()
+        self.next_step()
+        self.clip_on_prompt()
         self.next_step()
         self.level(lv, bounds, (bounds[0], bounds[1]), spec, tag='test')
         self.g.cmd('G0 Z10')
@@ -976,8 +988,9 @@ class App:
             return self.flash('Connect first.')
         if self.m.job_running:
             return self.flash('A job is already running.')
-        self.set_steps([('t', 'load', 'Clip probe, bit above copper'), ('t', 'circuit', 'Circuit check'),
-                        ('t', 'level', 'Find Z0 + height map'), ('t', 'done', 'Done')])
+        self.set_steps([('t', 'load', 'Copper clip on, bit above copper'), ('t', 'circuit', 'Circuit check'),
+                        ('t', 'clipon', 'Clip probe lead on the bit'), ('t', 'level', 'Find Z0 + height map'),
+                        ('t', 'done', 'Done')])
         self.m.q.put(('job', self.spec(maptest=True)))
 
     def stop(self):
@@ -1056,7 +1069,7 @@ class App:
         self.steps = steps
         self.step_labels = []
         for _, _, text in steps:
-            l = tk.Label(self.steps_fr, text='○  ' + text, bg=BG, fg=DIM, font=('Segoe UI', 9), anchor='w', pady=0)
+            l = tk.Label(self.steps_fr, text='○  ' + text, bg=BG, fg=DIM, font=('Segoe UI', 8), anchor='w', pady=0)
             l.pack(fill='x')
             self.step_labels.append(l)
         self.step_idx = -1
@@ -1066,11 +1079,11 @@ class App:
         for k, l in enumerate(self.step_labels):
             text = self.steps[k][2]
             if k < i:
-                l.configure(text='✓  ' + text, fg='#3ddc84', font=('Segoe UI', 9))
+                l.configure(text='✓  ' + text, fg='#3ddc84', font=('Segoe UI', 8))
             elif k == i:
-                l.configure(text='►  ' + text, fg='#ffd54f', font=('Segoe UI', 10, 'bold'))
+                l.configure(text='►  ' + text, fg='#ffd54f', font=('Segoe UI', 9, 'bold'))
             else:
-                l.configure(text='○  ' + text, fg=DIM, font=('Segoe UI', 9))
+                l.configure(text='○  ' + text, fg=DIM, font=('Segoe UI', 8))
         if 0 <= i < len(self.steps):
             self.prog_lbl.configure(text=f'Step {i + 1}/{len(self.steps)}: {self.steps[i][2]}')
 
