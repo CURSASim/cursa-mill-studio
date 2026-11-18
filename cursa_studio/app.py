@@ -533,22 +533,29 @@ class Machine(threading.Thread):
         age = (time.time() - saved['t']) / 60
         g54 = self.g54()
         n = len(saved['x']) * len(saved['y'])
-        opts = [f'Probe a new map\n{n} points, a few minutes', 'Reuse the saved map\n1 touch to find Z0 for this bit']
-        modes = ['new', 'touch']
+        cut = saved.get('traces_cut', False)
+        if cut:      # grooves now isolate copper from the clip: a grid touch there would not close the probe
+            opts, modes = ['Reuse the saved map\n1 touch on the blank margin to find Z0 for this bit'], ['touch']
+        else:
+            opts = [f'Probe a new map\n{n} points, a few minutes',
+                    'Reuse the saved map\n1 touch to find Z0 for this bit']
+            modes = ['new', 'touch']
         if first_bit and g54:
             ok = ('z0' not in saved or abs(g54[2] - saved['z0']) < 0.002) and saved.get('z0_for', tag) == tag
             if ok:
                 opts.append('Reuse the map + current Z0\nno probing: only if this bit was not touched since')
                 modes.append('notouch')
         pick = self.choose(f'HEIGHT MAP\nA map of this blank is saved ({len(saved["x"])} x {len(saved["y"])}, bow '
-                           f'{saved["range"]:.2f} mm, {age:.0f} min ago). Reuse it only if the blank has not moved.',
-                           opts)
+                           f'{saved["range"]:.2f} mm, {age:.0f} min ago). Reuse it only if the blank has not moved.'
+                           + ('\n\nNo new map: the traces are already cut, and copper cut off from the clip would '
+                              'not stop the bit.' if cut else ''), opts)
         return modes[pick]
 
     def remember_map(self, spec, hm, ref, z0, tag):
         key = self.map_key(spec)
         d = hm.to_dict()
-        d.update({'ref': list(ref), 't': time.time(), 'range': float(hm.range), 'z0': float(z0), 'z0_for': tag})
+        d.update({'ref': list(ref), 't': time.time(), 'range': float(hm.range), 'z0': float(z0), 'z0_for': tag,
+                  'traces_cut': bool(self.maps.get(key, {}).get('traces_cut', False))})
         self.maps = {key: d}
         save_maps(self.maps)
 
@@ -624,8 +631,9 @@ class Machine(threading.Thread):
         w, h = spec['copper_w'], spec['copper_h']
         bounds = (5.0, 5.0, w - 5.0, h - 5.0)
         self.next_step()
-        self.prompt('HEIGHT MAP TEST\nNothing is cut. One probe clip on the copper, other lead free. Bit 5-15 mm '
-                    'above the copper.', 'Copper clip on, bit above the copper')
+        self.prompt('HEIGHT MAP TEST\nNothing is cut. ONLY on a blank with no traces cut yet (cut-off copper would '
+                    'not stop the bit). One probe clip on the copper, other lead free. Bit 5-15 mm above the copper.',
+                    'Uncut blank, copper clip on')
         self.next_step()
         self.circuit_check()
         self.next_step()
@@ -638,6 +646,11 @@ class Machine(threading.Thread):
 
     def stream_file(self, path, role, hm, spec):
         g = self.g
+        if role == 'traces':
+            key = self.map_key(spec)
+            if key in self.maps:
+                self.maps[key]['traces_cut'] = True
+                save_maps(self.maps)
         name = os.path.basename(path)
         lines = cj.leveled_lines(path, hm)
         if not any(re.search(r'\bM0?3\b', l.upper()) for l in lines):
