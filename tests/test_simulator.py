@@ -118,3 +118,12 @@ def test_big_bow_asks_instead_of_stopping(monkeypatch, tmp_path):
         else:
             with pytest.raises(core.GrblError):
                 lv.grid((5, 5, 60, 40), 10, range_max=0.05)
+
+
+def test_comments_nested_and_check(tmp_path):
+    assert core.strip_comment('( a (b) c )') == ''
+    assert core.strip_comment('G1 X1 (move (fast)) Y2 ; tail') == 'G1 X1  Y2'
+    assert core.strip_comment(')') == ''
+    p = tmp_path / 'bad.nc'
+    p.write_text('( ok (nested) )\nG0 X1\nhello\nG1 Z-0.1 F25\n')
+    assert [n for n, _ in core.check_file(str(p))] == [3]

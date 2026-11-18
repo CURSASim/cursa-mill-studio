@@ -1042,6 +1042,12 @@ class App:
         if self.m.job_running:
             return self.flash('Not during a job.')
         if path:
+            bad = cj.check_file(path)
+            if bad:
+                lst = '\n'.join(f'  line {n}: {t}' for n, t in bad[:6])
+                messagebox.showerror(APP, f'{os.path.basename(path)} has {len(bad)} line(s) GRBL would reject:\n\n{lst}'
+                                          f'\n\nFix the file (or regenerate it) before cutting.')
+                return
             try:
                 self.preview[role] = parse_preview(path)
                 cj.cut_bounds([path])
@@ -1079,6 +1085,10 @@ class App:
         for p in f.values():
             if not os.path.exists(p):
                 return messagebox.showerror(APP, f'File not found:\n{p}')
+            bad = cj.check_file(p)
+            if bad:
+                return messagebox.showerror(APP, f'{os.path.basename(p)}: line {bad[0][0]} would be rejected by GRBL:'
+                                                 f'\n{bad[0][1]}')
         lst = '\n'.join(f'  {r}: {os.path.basename(p)}' for r, p in f.items())
         if not messagebox.askokcancel(APP, f'Start the job?\n\n{lst}\n\nX/Y zero must already be set on the copper '
                                            f'lower-left corner. Blank locked in the fixture.'):

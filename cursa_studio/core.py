@@ -357,8 +357,31 @@ W = re.compile(r'([A-Z])\s*(-?\d*\.?\d+)')
 
 # ------------------------------------------------------------------ G-code reading
 def strip_comment(line):
-    line = re.sub(r'\(.*?\)', '', line)
-    return line.split(';', 1)[0].strip()
+    """Remove ( ) comments - nested ones too, and a stray ')' - and everything after ';'."""
+    out, depth = [], 0
+    for ch in line.split(';', 1)[0] if '(' not in line else line:
+        if ch == '(':
+            depth += 1
+        elif ch == ')':
+            depth = max(0, depth - 1)
+        elif depth == 0:
+            out.append(ch)
+    return ''.join(out).split(';', 1)[0].strip()
+
+
+_WORDS = re.compile(r'^(\s*[A-Za-z]\s*[-+]?(\d+\.?\d*|\.\d+))+\s*$')
+
+
+def check_file(path):
+    """Lines GRBL would reject (no letter/number words after removing comments). Returns [(line_no, text)]."""
+    bad = []
+    for n, raw in enumerate(open(path, errors='replace'), 1):
+        t = strip_comment(raw.strip())
+        if not t or t == '%' or t.startswith('$'):
+            continue
+        if not _WORDS.match(t):
+            bad.append((n, raw.strip()[:80]))
+    return bad
 
 
 def arc_points(x0, y0, x1, y1, i, j, cw, seg=0.25):

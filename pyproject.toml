@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cursa-mill-studio"
-version = "1.0.5"
+version = "1.0.6"
 description = "PCB isolation milling for GRBL desktop CNCs: keyboard jogging, probe auto-levelling (height map), guided two-bit job with bit-change re-probing."
 readme = "README.md"
 license = { file = "LICENSE" }
