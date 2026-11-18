@@ -98,3 +98,23 @@ def test_noisy_probe(files, monkeypatch, tmp_path):
     d1 = [c[2] for c in f.cuts[1]]
     assert 0.08 < min(d1) and max(d1) < 0.12          # depths still right
     assert f.rapid_crash == 0 and f.cut_while_stopped == 0
+
+
+def test_big_bow_asks_instead_of_stopping(monkeypatch, tmp_path):
+    """Over the flatness limit the operator decides: accept -> map returned, refuse -> stop."""
+    for accept in (True, False):
+        f = FakeGrbl()
+        f.mount(1)
+        f.m = [-180.0, -120.0, -38 + 12]
+        g = core.Grbl(f)
+        g.reset()
+        lv = core.Leveler(g, AutoUI(f))
+        g.cmd('G21 G90')
+        lv.set_z0_here(lv.touch_blind(5, 5))
+        lv.accept_big_range = lambda hm, limit: accept
+        if accept:
+            hm = lv.grid((5, 5, 60, 40), 10, range_max=0.05)
+            assert hm.range > 0.05
+        else:
+            with pytest.raises(core.GrblError):
+                lv.grid((5, 5, 60, 40), 10, range_max=0.05)

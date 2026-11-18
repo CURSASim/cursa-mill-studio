@@ -559,6 +559,13 @@ class Leveler:
     fine_feed = 20.0
     agree = 0.015            # two fine touches must agree within this (mm)
 
+    last_map = None
+
+    def accept_big_range(self, hm, limit):
+        """Called when the copper is more than `limit` out of flat. Return True to use the map anyway (the GUI asks
+        the operator); the console runner stops."""
+        return False
+
     def confirmed_low(self, vals):
         """Noise can only make a touch read HIGH (the probe stops early), never low. So the copper is the LOWEST
         reading, accepted once a second reading agrees with it. Returns that value or None."""
@@ -621,7 +628,7 @@ class Leveler:
         self.z0 = zc_machine - z_work
         self.g.cmd(f'G10 L2 P1 Z{self.z0:.4f}')
 
-    def grid(self, bounds, spacing=10.0, residual_max=0.04, range_max=1.0, range_warn=0.4):
+    def grid(self, bounds, spacing=10.0, residual_max=0.04, range_max=1.0, range_warn=0.4, refine=False):
         x0, y0, x1, y1 = bounds
         nx = max(2, math.ceil((x1 - x0) / spacing) + 1)
         ny = max(2, math.ceil((y1 - y0) / spacing) + 1)
@@ -650,10 +657,17 @@ class Leveler:
 
         print(f'probing {nx} x {ny} = {nx * ny} points over X {x0:.1f}..{x1:.1f}, Y {y0:.1f}..{y1:.1f}')
         hm = build(xs, ys)
-        if hm.range > range_max:              # fail fast, before spending time on refinement
+        self.last_map = hm                    # kept even if we stop below
+        if hm.range > range_max and not self.accept_big_range(hm, range_max):
             raise GrblError(f'height range {hm.range:.2f} mm > {range_max}: the blank is not seated (lift it, clean '
                             'under it, re-clamp) or badly bowed')
-        # spot-check cell centres; refine ONLY the columns / rows whose cells miss. 40 um on a 0.08 deep V cut changes
+        if not refine:                        # default: the grid alone (Ale 17:26: "shouldn't need more than those
+            print(f'map range {hm.range:.3f} mm')  # 80 points"); a 10 mm grid on a smooth bow is well inside 0.04
+            if hm.range > range_warn:
+                print(f'NOTE: the copper is {hm.range:.2f} mm out of flat: compensated, check the blank is clamped down')
+            self.g.cmd(f'G0 Z{top + 5:.3f}')
+            return hm
+        # optional: spot-check cell centres; refine ONLY the columns / rows whose cells miss. 40 um on a 0.08 deep V cut changes
         # the groove width by ~0.01 mm, so a smaller miss is not worth the probing time.
         ci = sorted(set(list(range(0, nx - 1, max(1, (nx - 1) // 3))) + [nx - 2]))
         cj = sorted(set(list(range(0, ny - 1, max(1, (ny - 1) // 2))) + [ny - 2]))

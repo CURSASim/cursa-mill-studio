@@ -69,6 +69,21 @@ def save_settings(s):
         pass
 
 
+def load_maps():
+    try:
+        return json.load(open(os.path.join(RUNS, 'saved_maps.json')))
+    except Exception:
+        return {}
+
+
+def save_maps(maps):
+    try:
+        os.makedirs(RUNS, exist_ok=True)
+        json.dump(maps, open(os.path.join(RUNS, 'saved_maps.json'), 'w'))
+    except Exception:
+        pass
+
+
 def make_shortcuts():
     """Windows: Desktop + Start Menu shortcuts that start the app with pythonw.exe (signed by the PSF, so Smart App
     Control allows it). Returns the paths written."""
@@ -148,7 +163,7 @@ class GuiGrbl(cj.Grbl):
     on_line = None
 
     def _handle(self, line):
-        if line and self.on_line and not line.startswith(('<', '[PRB:')) and line != 'ok':
+        if line and self.on_line and not line.startswith(('<', '[PRB:', '[G5', '[G9', '[G2', '[G3', '[TLO')) and line != 'ok':
             self.on_line(line)
         super()._handle(line)
 
@@ -202,6 +217,7 @@ class Machine(threading.Thread):
         self.job_running = False
         self.waiting = False
         self.abort = False
+        self.maps = load_maps()
 
     # ------------------------------------------------------------------ loop
     def run(self):
@@ -342,6 +358,43 @@ class Machine(threading.Thread):
             self.waiting = False
             self.post(('prompt_clear',))
 
+    def choose(self, msg, options):
+        """Operator picks one of `options` (buttons). Returns the index."""
+        while not self.reply.empty():
+            self.reply.get_nowait()
+        self.waiting = True
+        self.post(('choice', msg, options))
+        try:
+            while True:
+                if self.abort:
+                    raise Abort()
+                try:
+                    r = self.reply.get_nowait()
+                except queue.Empty:
+                    r = None
+                if r == 'cancel':
+                    raise Abort()
+                if isinstance(r, str) and r.startswith('choice:'):
+                    return int(r.split(':')[1])
+                self.service()
+        finally:
+            self.waiting = False
+            self.post(('prompt_clear',))
+
+    def map_key(self, spec):
+        """A saved map is valid for the same files and the same X/Y zero (blank not moved, not re-zeroed)."""
+        try:
+            off = self.g.offsets().get('G54', '')
+        except cj.GrblError:
+            off = ''
+        xy = ','.join(off.split(',')[:2])
+        sig = []
+        for r in ('traces', 'holes', 'cutout'):
+            p = spec['files'].get(r)
+            if p:
+                sig.append(f'{r}={os.path.abspath(p)}@{os.path.getmtime(p):.0f}')
+        return '|'.join(sig) + f'|G54xy={xy}|grid={spec["grid"]}|margin={spec["margin"]}'
+
     def check(self):
         if self.abort:
             raise Abort()
@@ -459,13 +512,31 @@ class Machine(threading.Thread):
             pass
 
     def level(self, lv, bounds, ref, spec, tag):
+        key = self.map_key(spec) if not spec.get('maptest') else None
+        saved = self.maps.get(key) if key else None
+        if saved:
+            age = (time.time() - saved['t']) / 60
+            pick = self.choose(f'A height map of this blank ({len(saved["x"])} x {len(saved["y"])} points, bow '
+                               f'{saved["range"]:.2f} mm, {age:.0f} min ago, same files and same X/Y zero) is saved.\n\n'
+                               f'REUSE it: one touch to find Z0 for this bit (about 1 min). Only if the blank has NOT '
+                               f'moved or been re-clamped since.\n\nThe machine moves as soon as you pick.',
+                               ['Reuse the saved map (1 touch)', 'Probe a new map'])
+            if pick == 0:
+                hm = cj.HeightMap.from_dict(saved)
+                rx, ry = saved['ref']
+                self.post(('log', 'Reusing the saved height map: finding Z0 for this bit (blind touch)...'))
+                lv.set_z0_here(lv.touch_blind(rx, ry), float(hm(rx, ry)))
+                self.post(('log', f'Z0 found at X{rx:.2f} Y{ry:.2f}; using the saved map (bow {hm.range * 1000:.0f} um).'))
+                self.post(('map', hm.xs, hm.ys, [list(map(float, r)) for r in hm.z], hm.range))
+                self.g.cmd('G0 Z5')
+                return hm
         self.post(('log', 'Finding Z0 (blind touch)...'))
         lv.set_z0_here(lv.touch_blind(*ref))
         self.post(('log', f'Z0 set on the copper at X{ref[0]:.2f} Y{ref[1]:.2f}'))
         nx = max(2, math.ceil((bounds[2] - bounds[0]) / spec['grid']) + 1)
         ny = max(2, math.ceil((bounds[3] - bounds[1]) / spec['grid']) + 1)
         total = nx * ny
-        self.post(('log', f'Mapping {nx} x {ny} = {total} points (each point: fast touch + 1 confirming touch, more only if they disagree)...'))
+        self.post(('log', f'Mapping {nx} x {ny} = {total} points (no extra points; each point: fast touch + 1 confirming touch, more only if noise)...'))
         orig = cj.Leveler.touch
         count = [0]
 
@@ -476,7 +547,15 @@ class Machine(threading.Thread):
             self.post(('probe_pt', x, y, z, count[0], total))
             return z
 
+        def accept(hm, limit):
+            self.post(('map', hm.xs, hm.ys, [list(map(float, r)) for r in hm.z], hm.range))
+            return self.prompt(f'The copper is {hm.range:.2f} mm out of flat (limit {limit:g} mm). The height map '
+                               f'compensates it, but press on the middle of the blank first: if it moves, it is not '
+                               f'clamped down and the bit will push it. Use this map and carry on?',
+                               f'Blank is held down - use the map ({hm.range:.2f} mm bow)')
+
         lv.touch = touch
+        lv.accept_big_range = accept
         try:
             self.post(('map_clear',))
             hm = lv.grid(bounds, spec['grid'])
@@ -484,6 +563,11 @@ class Machine(threading.Thread):
             del lv.touch
         path = os.path.join(RUNS, time.strftime('%Y%m%d_%H%M%S') + f'_{tag}.heightmap.json')
         cj._save(hm, list(ref), path)
+        if key:
+            d = hm.to_dict()
+            d.update({'ref': list(ref), 't': time.time(), 'range': float(hm.range)})
+            self.maps = {key: d}               # one blank at a time
+            save_maps(self.maps)
         self.post(('map', hm.xs, hm.ys, [list(map(float, r)) for r in hm.z], hm.range))
         if self.g.noise_events:
             self.post(('log', f'Probe noise filtered: {self.g.noise_events} events so far (readings re-checked). Many '
@@ -1057,7 +1141,19 @@ class App:
         except Exception:
             pass
 
+    def show_choice(self, msg, options):
+        self.show_prompt(msg, None, False)
+        self.choice_btns = []
+        for i, o in enumerate(options):
+            b = ttk.Button(self.prompt_fr, text=o, takefocus=0, style='Go.TButton' if i == 0 else 'TButton',
+                           command=lambda i=i: (self.m.reply.put(f'choice:{i}'), self.canvas.focus_set()))
+            b.pack(fill='x', padx=8, pady=(0, 6))
+            self.choice_btns.append(b)
+
     def clear_prompt(self, text='', color=FG):
+        for b in getattr(self, 'choice_btns', []):
+            b.destroy()
+        self.choice_btns = []
         self.confirm_chk.pack_forget()
         self.go_btn.pack_forget()
         self.prompt_txt.configure(text=text, fg=color)
@@ -1304,6 +1400,8 @@ class App:
             self.status = {}
         elif k == 'prompt':
             self.show_prompt(item[1], item[2], item[3])
+        elif k == 'choice':
+            self.show_choice(item[1], item[2])
         elif k == 'prompt_clear':
             self.clear_prompt()
         elif k == 'step':
@@ -1325,7 +1423,7 @@ class App:
             self.paused = False
             self.pause_btn.configure(text='Pause')
             if self.step_idx < len(self.steps) - 1:
-                why = getattr(self, 'last_error', '') or 'stopped by you (STOP / cancel)'
+                why = (getattr(self, 'last_error', '') or 'stopped by you (STOP / cancel)').replace('JOB STOPPED: ', '')
                 self.clear_prompt(f'JOB STOPPED: {why}\n\nFix the cause, then START JOB again (it re-probes from the '
                                   f'start). Full log: {os.path.join(HOME, "log.txt")}', '#ff6e6e')
         elif k == 'done':
@@ -1344,6 +1442,7 @@ class App:
             self.map_lbl.configure(text='probing...')
         elif k == 'probe_pt':
             _, x, y, z, cnt, tot = item
+            self.probe_count = getattr(self, 'probe_count', 0) + 1
             self.map_pts.append((x, y, z))
             zs = [p[2] for p in self.map_pts]
             self.draw_map_pt(x, y, z, min(zs), max(zs))
@@ -1406,7 +1505,13 @@ def autotest(app):
 
     shots = [0]
 
+    runs = [0]
+
     def answer():
+        if getattr(app, 'choice_btns', None):
+            app.choice_btns[0].invoke()
+            app.root.after(150, answer)
+            return
         if app.go_btn.winfo_ismapped():
             if os.environ.get('CURSA_SHOT') and shots[0] < 3:
                 shots[0] += 1
@@ -1415,6 +1520,16 @@ def autotest(app):
             app.confirm_var.set(True)
             app.update_go()
             app.go()
+        if not app.m.job_running and app.step_idx >= len(app.steps) - 1 and app.steps and \
+                os.environ.get('CURSA_AUTOTEST_TWICE') and runs[0] == 0:
+            runs[0] = 1
+            app.first_run = {'cuts1': len(app.m.sim.cuts[1]), 'probe_pts': getattr(app, 'probe_count', 0)}
+            app.probe_count = 0
+            app.m.sim.cuts = {1: [], 2: []}
+            app.set_steps(plan_steps(app.files()))
+            app.m.q.put(('job', app.spec()))
+            app.root.after(400, answer)
+            return
         if not app.m.job_running and app.step_idx >= len(app.steps) - 1 and app.steps:
             app.root.update()
             if os.environ.get('CURSA_SHOT'):
@@ -1422,7 +1537,9 @@ def autotest(app):
             sim = app.m.sim
             d1 = [c[2] for c in sim.cuts[1]] if not os.environ.get('CURSA_MAPTEST') else []
             d2 = [c[2] for c in sim.cuts[2]]
-            json.dump({'keytest': getattr(app, 'keytest', None), 'map_pts': len(app.map_pts), 'steps_done': app.step_idx, 'n_steps': len(app.steps),
+            json.dump({'first_run': getattr(app, 'first_run', None), 'probe_pts': getattr(app, 'probe_count', 0),
+                       'reused': 'Reusing the saved height map' in app.log_txt.get('1.0', 'end'),
+                       'keytest': getattr(app, 'keytest', None), 'map_pts': len(app.map_pts), 'steps_done': app.step_idx, 'n_steps': len(app.steps),
                        'trace_depth': [min(d1), max(d1)] if d1 else None,
                        'drill_depth': sorted(set(round(v, 2) for v in d2)) if d2 else None,
                        'rapid_crash': sim.rapid_crash, 'cut_spindle_off': sim.cut_while_stopped,
