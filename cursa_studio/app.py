@@ -405,8 +405,8 @@ class Machine(threading.Thread):
         if st.get('probe'):
             raise cj.GrblError('the PROBE light is already ON: the bit is touching the copper or the clips touch each '
                                'other. Lift the bit / separate the clips, then start again.')
-        self.post(('prompt', 'CIRCUIT CHECK: touch the free probe lead to the copper (or to the copper clip) for a '
-                             'second. The PROBE light must turn green, then let go.', None, False))
+        self.post(('prompt', 'CIRCUIT CHECK\nTouch the free probe lead to the copper for a second. The PROBE light '
+                             'turns green, then let go. It carries on by itself.', None, False))
         if self.sim is not None:
             self.sim.touch_pulse = 6
         seen, t0 = False, time.time()
@@ -470,10 +470,11 @@ class Machine(threading.Thread):
                         self.next_step()
                 else:
                     verb = 'Put' if gi == 0 else 'SWAP TO'
-                    self.prompt(f'{verb} the {bit} in the collet (stick-out at least 10 mm, collet tight). Put one '
-                                f'probe clip on the copper; keep the other probe lead FREE for the circuit check. Jog '
-                                f'the bit 5-15 mm above the copper near X0 Y0 (arrow keys / Z / X work now).',
-                                f'{bit.split(" (")[0]} loaded, copper clip on')
+                    name = bit.split(' (')[0]
+                    self.prompt(f'{"LOAD THE" if gi == 0 else "SWAP TO THE"} {name.upper()}\n{bit[len(name):].strip(" ()")}: '
+                                f'stick-out ≥ 10 mm, collet tight. One probe clip on the copper (right edge), other '
+                                f'lead free. Jog the bit 5-15 mm above the copper (jog keys work now).',
+                                f'{name} in, copper clip on')
                     self.next_step()
                     self.circuit_check()
                     self.next_step()
@@ -481,8 +482,8 @@ class Machine(threading.Thread):
                     self.next_step()
                     hm = self.level(lv, bounds, ref, spec, tag=roles[0], mode=mode)
                 self.next_step()
-                self.prompt('Probe clips OFF the bit (and clear of the spindle). The spindle starts as soon as you '
-                            'confirm.', 'Clips off - start the spindle and cut')
+                self.prompt('CLIPS OFF - READY TO CUT\nTake the probe lead off the bit and keep it clear of the '
+                            'spindle. The spindle starts when you confirm.', 'Clips off - start cutting')
                 for r in roles:
                     self.next_step()
                     self.stream_file(files[r], r, hm, spec)
@@ -531,18 +532,16 @@ class Machine(threading.Thread):
             return 'new'
         age = (time.time() - saved['t']) / 60
         g54 = self.g54()
-        opts, modes = [], []
+        n = len(saved['x']) * len(saved['y'])
+        opts = [f'Probe a new map\n{n} points, a few minutes', 'Reuse the saved map\n1 touch to find Z0 for this bit']
+        modes = ['new', 'touch']
         if first_bit and g54:
             ok = ('z0' not in saved or abs(g54[2] - saved['z0']) < 0.002) and saved.get('z0_for', tag) == tag
             if ok:
-                opts.append('Same bit, untouched since the map: use the map AND the current Z0 - NO probing')
+                opts.append('Reuse the map + current Z0\nno probing: only if this bit was not touched since')
                 modes.append('notouch')
-        opts += ['Reuse the map, find Z0 for the bit in the collet (1 touch)', 'Probe a new map']
-        modes += ['touch', 'new']
-        pick = self.choose(f'A height map of this blank is saved ({len(saved["x"])} x {len(saved["y"])} points, bow '
-                           f'{saved["range"]:.2f} mm, {age:.0f} min ago, same files, same X/Y zero). Only reuse it if '
-                           f'the blank has NOT moved or been re-clamped.\n\n"NO probing" also needs the {bit.split(" (")[0]}'
-                           f' to be exactly as it was when the map was made (not re-tightened, no Z zero changed).',
+        pick = self.choose(f'HEIGHT MAP\nA map of this blank is saved ({len(saved["x"])} x {len(saved["y"])}, bow '
+                           f'{saved["range"]:.2f} mm, {age:.0f} min ago). Reuse it only if the blank has not moved.',
                            opts)
         return modes[pick]
 
@@ -594,10 +593,9 @@ class Machine(threading.Thread):
 
         def accept(hm, limit):
             self.post(('map', hm.xs, hm.ys, [list(map(float, r)) for r in hm.z], hm.range))
-            return self.prompt(f'The copper is {hm.range:.2f} mm out of flat (limit {limit:g} mm). The height map '
-                               f'compensates it, but press on the middle of the blank first: if it moves, it is not '
-                               f'clamped down and the bit will push it. Use this map and carry on?',
-                               f'Blank is held down - use the map ({hm.range:.2f} mm bow)')
+            return self.prompt(f'COPPER IS {hm.range:.2f} mm OUT OF FLAT\nOver the {limit:g} mm limit. The map '
+                               f'compensates it, but press the middle of the blank: if it moves, re-clamp it first.',
+                               'Blank is held down - use this map')
 
         lv.touch = touch
         lv.accept_big_range = accept
@@ -619,17 +617,15 @@ class Machine(threading.Thread):
         return hm
 
     def clip_on_prompt(self):
-        self.prompt('Circuit OK. Now clip the free probe lead onto the BIT. Check the bit is still 5-15 mm above the '
-                    'copper. The machine starts moving down to touch the copper as soon as you confirm.',
-                    'Probe lead is on the bit - start probing')
+        self.prompt('CLIP THE LEAD ON THE BIT\nCircuit OK. Bit still 5-15 mm above the copper. The machine moves down '
+                    'to touch as soon as you confirm.', 'Lead on the bit - start probing')
 
     def map_test(self, lv, spec):
         w, h = spec['copper_w'], spec['copper_h']
         bounds = (5.0, 5.0, w - 5.0, h - 5.0)
         self.next_step()
-        self.prompt('HEIGHT MAP TEST (nothing is cut). Put one probe clip on the copper; keep the other probe lead FREE '
-                    'for the circuit check. Bit 5-15 mm above the copper near X0 Y0.', 'Copper clip on, bit above the '
-                    'copper')
+        self.prompt('HEIGHT MAP TEST\nNothing is cut. One probe clip on the copper, other lead free. Bit 5-15 mm '
+                    'above the copper.', 'Copper clip on, bit above the copper')
         self.next_step()
         self.circuit_check()
         self.next_step()
@@ -900,10 +896,13 @@ class App:
 
         self.prompt_fr = tk.Frame(right, bg=PANEL, highlightthickness=2, highlightbackground='#444')
         self.prompt_fr.pack(fill='x', pady=4)
-        self.prompt_txt = tk.Label(self.prompt_fr, text='Connect, jog the bit over the copper lower-left corner, '
-                                                        'click "Set X/Y zero here", pick the files, START JOB.',
-                                   bg=PANEL, fg=FG, wraplength=350, justify='left', font=('Segoe UI', 10))
-        self.prompt_txt.pack(fill='x', padx=8, pady=8)
+        self.prompt_title = tk.Label(self.prompt_fr, text='READY', bg=PANEL, fg=FG, anchor='w',
+                                     font=('Segoe UI', 13, 'bold'))
+        self.prompt_title.pack(fill='x', padx=10, pady=(8, 0))
+        self.prompt_txt = tk.Label(self.prompt_fr, text='Connect, Home, jog to the copper lower-left corner, '
+                                                        '"Set X/Y zero here", pick the files, START JOB.',
+                                   bg=PANEL, fg=FG, wraplength=350, justify='left', anchor='w', font=('Segoe UI', 10))
+        self.prompt_txt.pack(fill='x', padx=10, pady=(2, 8))
         self.confirm_var = tk.BooleanVar(value=False)
         self.confirm_chk = tk.Checkbutton(self.prompt_fr, text='', variable=self.confirm_var, takefocus=0,
                                           command=self.update_go, bg=PANEL, fg=FG, activebackground=PANEL,
@@ -1131,10 +1130,6 @@ class App:
             if bad:
                 return messagebox.showerror(APP, f'{os.path.basename(p)}: line {bad[0][0]} would be rejected by GRBL:'
                                                  f'\n{bad[0][1]}')
-        lst = '\n'.join(f'  {r}: {os.path.basename(p)}' for r, p in f.items())
-        if not messagebox.askokcancel(APP, f'Start the job?\n\n{lst}\n\nX/Y zero must already be set on the copper '
-                                           f'lower-left corner. Blank locked in the fixture.'):
-            return
         self.canvas.focus_set()
         self.trail = []
         self.set_steps(plan_steps(f))
@@ -1189,8 +1184,15 @@ class App:
     def update_go(self):
         self.go_btn.state(['!disabled'] if self.confirm_var.get() else ['disabled'])
 
+    def _set_msg(self, msg, color):
+        title, _, detail = msg.partition('\n')
+        if not detail:
+            title, detail = '', title
+        self.prompt_title.configure(text=title, fg=color)
+        self.prompt_txt.configure(text=detail, fg=FG if title else color)
+
     def show_prompt(self, msg, label, dual):
-        self.prompt_txt.configure(text=msg, fg='#ffd54f')
+        self._set_msg(msg, '#ffd54f')
         self.prompt_fr.configure(highlightbackground='#ffd54f')
         self.confirm_chk.pack_forget()
         self.go_btn.pack_forget()
@@ -1199,7 +1201,7 @@ class App:
         elif dual:
             self.confirm_var.set(False)
             self.confirm_chk.configure(text=label)
-            self.confirm_chk.pack(anchor='w', padx=8, pady=(0, 4))
+            self.confirm_chk.pack(fill='x', padx=10, pady=(0, 6), ipady=4)
             self.go_btn.configure(text='GO')
             self.go_btn.pack(fill='x', padx=8, pady=(0, 8))
             self.update_go()
@@ -1218,9 +1220,13 @@ class App:
         self.show_prompt(msg, None, False)
         self.choice_btns = []
         for i, o in enumerate(options):
-            b = ttk.Button(self.prompt_fr, text=o, takefocus=0, style='Go.TButton' if i == 0 else 'TButton',
-                           command=lambda i=i: (self.m.reply.put(f'choice:{i}'), self.canvas.focus_set()))
-            b.pack(fill='x', padx=8, pady=(0, 6))
+            b = tk.Button(self.prompt_fr, text=o, takefocus=0, justify='left', anchor='w', relief='flat',
+                          bg='#3a3d46', fg=FG, activebackground='#1565c0', activeforeground='white', padx=10, pady=6,
+                          font=('Segoe UI', 10), cursor='hand2',
+                          command=lambda i=i: (self.m.reply.put(f'choice:{i}'), self.canvas.focus_set()))
+            b.pack(fill='x', padx=10, pady=(0, 6))
+            b.bind('<Enter>', lambda e, b=b: b.configure(bg='#4a4e5a'))
+            b.bind('<Leave>', lambda e, b=b: b.configure(bg='#3a3d46'))
             self.choice_btns.append(b)
 
     def clear_prompt(self, text='', color=FG):
@@ -1229,7 +1235,7 @@ class App:
         self.choice_btns = []
         self.confirm_chk.pack_forget()
         self.go_btn.pack_forget()
-        self.prompt_txt.configure(text=text, fg=color)
+        self._set_msg(text, color)
         self.prompt_fr.configure(highlightbackground='#444')
 
     def set_steps(self, steps):
@@ -1497,13 +1503,13 @@ class App:
             self.pause_btn.configure(text='Pause')
             if self.step_idx < len(self.steps) - 1:
                 why = (getattr(self, 'last_error', '') or 'stopped by you (STOP / cancel)').replace('JOB STOPPED: ', '')
-                self.clear_prompt(f'JOB STOPPED: {why}\n\nFix the cause, then START JOB again (it re-probes from the '
-                                  f'start). Full log: {os.path.join(HOME, "log.txt")}', '#ff6e6e')
+                self.clear_prompt(f'JOB STOPPED\n{why}\n\nFix it, then START JOB again (a saved map can be reused). '
+                                  f'Log button = full log.', '#ff6e6e')
         elif k == 'done':
             self.mark_step(len(self.steps) - 1)
             self.step_labels[-1].configure(text='✓  Done', fg='#3ddc84')
             el = time.time() - (self.job_t0 or time.time())
-            self.clear_prompt(item[1] + f'\n(total {el / 60:.0f} min)', '#3ddc84')
+            self.clear_prompt('DONE\n' + item[1] + f' (total {el / 60:.0f} min)', '#3ddc84')
             self.prog['value'] = 1000
             try:
                 self.root.bell()
@@ -1592,6 +1598,10 @@ def autotest(app):
 
     def answer():
         if getattr(app, 'choice_btns', None):
+            if os.environ.get('CURSA_SHOT') and not getattr(app, '_choice_shot', False):
+                app._choice_shot = True
+                app.root.update()
+                os.system(f'import -window root {os.environ["CURSA_SHOT"]}_choice.png')
             app.choice_btns[0].invoke()
             app.root.after(150, answer)
             return
