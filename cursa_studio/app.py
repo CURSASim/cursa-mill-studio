@@ -463,20 +463,26 @@ class Machine(threading.Thread):
                 groups.append(('DRILL bit (1.0 mm)', dr))
             for gi, (bit, roles) in enumerate(groups):
                 self.next_step()
-                verb = 'Put' if gi == 0 else 'SWAP TO'
-                self.prompt(f'{verb} the {bit} in the collet (stick-out at least 10 mm, collet tight). Put one probe '
-                            f'clip on the copper; keep the other probe lead FREE for the circuit check. Jog the bit '
-                            f'5-15 mm above the copper near X0 Y0 (arrow keys / Z / X work now).',
-                            f'{bit.split(" (")[0]} loaded, copper clip on')
+                mode = self.ask_map_mode(spec, first_bit=(gi == 0), bit=bit, tag=roles[0])
+                if mode == 'notouch':
+                    hm = self.use_saved(lv, spec)
+                    for _ in range(3):                 # circuit / clip on / Z0 + map: not needed
+                        self.next_step()
+                else:
+                    verb = 'Put' if gi == 0 else 'SWAP TO'
+                    self.prompt(f'{verb} the {bit} in the collet (stick-out at least 10 mm, collet tight). Put one '
+                                f'probe clip on the copper; keep the other probe lead FREE for the circuit check. Jog '
+                                f'the bit 5-15 mm above the copper near X0 Y0 (arrow keys / Z / X work now).',
+                                f'{bit.split(" (")[0]} loaded, copper clip on')
+                    self.next_step()
+                    self.circuit_check()
+                    self.next_step()
+                    self.clip_on_prompt()
+                    self.next_step()
+                    hm = self.level(lv, bounds, ref, spec, tag=roles[0], mode=mode)
                 self.next_step()
-                self.circuit_check()
-                self.next_step()
-                self.clip_on_prompt()
-                self.next_step()
-                hm = self.level(lv, bounds, ref, spec, tag=roles[0])
-                self.next_step()
-                self.prompt('REMOVE the probe clips from the bit (and keep them clear of the spindle). The spindle '
-                            'starts as soon as you confirm.', 'Probe clips removed - start the spindle and cut')
+                self.prompt('Probe clips OFF the bit (and clear of the spindle). The spindle starts as soon as you '
+                            'confirm.', 'Clips off - start the spindle and cut')
                 for r in roles:
                     self.next_step()
                     self.stream_file(files[r], r, hm, spec)
@@ -511,25 +517,64 @@ class Machine(threading.Thread):
         except Exception:
             pass
 
-    def level(self, lv, bounds, ref, spec, tag):
+    def g54(self):
+        try:
+            return [float(v) for v in self.g.offsets().get('G54', '').split(',')]
+        except (cj.GrblError, ValueError):
+            return None
+
+    def ask_map_mode(self, spec, first_bit, bit, tag):
+        """'notouch' (same bit, saved map + current Z0), 'touch' (saved map, 1 touch for Z0) or 'new'."""
+        key = self.map_key(spec)
+        saved = self.maps.get(key)
+        if not saved:
+            return 'new'
+        age = (time.time() - saved['t']) / 60
+        g54 = self.g54()
+        opts, modes = [], []
+        if first_bit and g54:
+            ok = ('z0' not in saved or abs(g54[2] - saved['z0']) < 0.002) and saved.get('z0_for', tag) == tag
+            if ok:
+                opts.append('Same bit, untouched since the map: use the map AND the current Z0 - NO probing')
+                modes.append('notouch')
+        opts += ['Reuse the map, find Z0 for the bit in the collet (1 touch)', 'Probe a new map']
+        modes += ['touch', 'new']
+        pick = self.choose(f'A height map of this blank is saved ({len(saved["x"])} x {len(saved["y"])} points, bow '
+                           f'{saved["range"]:.2f} mm, {age:.0f} min ago, same files, same X/Y zero). Only reuse it if '
+                           f'the blank has NOT moved or been re-clamped.\n\n"NO probing" also needs the {bit.split(" (")[0]}'
+                           f' to be exactly as it was when the map was made (not re-tightened, no Z zero changed).',
+                           opts)
+        return modes[pick]
+
+    def remember_map(self, spec, hm, ref, z0, tag):
+        key = self.map_key(spec)
+        d = hm.to_dict()
+        d.update({'ref': list(ref), 't': time.time(), 'range': float(hm.range), 'z0': float(z0), 'z0_for': tag})
+        self.maps = {key: d}
+        save_maps(self.maps)
+
+    def use_saved(self, lv, spec):
+        saved = self.maps[self.map_key(spec)]
+        hm = cj.HeightMap.from_dict(saved)
+        g54 = self.g54()
+        lv.z0 = g54[2]
+        self.post(('log', f'Using the saved map and the current Z0 (G54 Z {g54[2]:.3f}): no probing.'))
+        self.post(('map', hm.xs, hm.ys, [list(map(float, r)) for r in hm.z], hm.range))
+        return hm
+
+    def level(self, lv, bounds, ref, spec, tag, mode='new'):
         key = self.map_key(spec) if not spec.get('maptest') else None
         saved = self.maps.get(key) if key else None
-        if saved:
-            age = (time.time() - saved['t']) / 60
-            pick = self.choose(f'A height map of this blank ({len(saved["x"])} x {len(saved["y"])} points, bow '
-                               f'{saved["range"]:.2f} mm, {age:.0f} min ago, same files and same X/Y zero) is saved.\n\n'
-                               f'REUSE it: one touch to find Z0 for this bit (about 1 min). Only if the blank has NOT '
-                               f'moved or been re-clamped since.\n\nThe machine moves as soon as you pick.',
-                               ['Reuse the saved map (1 touch)', 'Probe a new map'])
-            if pick == 0:
-                hm = cj.HeightMap.from_dict(saved)
-                rx, ry = saved['ref']
-                self.post(('log', 'Reusing the saved height map: finding Z0 for this bit (blind touch)...'))
-                lv.set_z0_here(lv.touch_blind(rx, ry), float(hm(rx, ry)))
-                self.post(('log', f'Z0 found at X{rx:.2f} Y{ry:.2f}; using the saved map (bow {hm.range * 1000:.0f} um).'))
-                self.post(('map', hm.xs, hm.ys, [list(map(float, r)) for r in hm.z], hm.range))
-                self.g.cmd('G0 Z5')
-                return hm
+        if saved and mode == 'touch':
+            hm = cj.HeightMap.from_dict(saved)
+            rx, ry = saved['ref']
+            self.post(('log', 'Reusing the saved height map: finding Z0 for this bit (blind touch)...'))
+            lv.set_z0_here(lv.touch_blind(rx, ry), float(hm(rx, ry)))
+            self.post(('log', f'Z0 found at X{rx:.2f} Y{ry:.2f}; using the saved map (bow {hm.range * 1000:.0f} um).'))
+            self.post(('map', hm.xs, hm.ys, [list(map(float, r)) for r in hm.z], hm.range))
+            self.g.cmd('G0 Z5')
+            self.remember_map(spec, hm, (rx, ry), lv.z0, tag)
+            return hm
         self.post(('log', 'Finding Z0 (blind touch)...'))
         lv.set_z0_here(lv.touch_blind(*ref))
         self.post(('log', f'Z0 set on the copper at X{ref[0]:.2f} Y{ref[1]:.2f}'))
@@ -564,10 +609,7 @@ class Machine(threading.Thread):
         path = os.path.join(RUNS, time.strftime('%Y%m%d_%H%M%S') + f'_{tag}.heightmap.json')
         cj._save(hm, list(ref), path)
         if key:
-            d = hm.to_dict()
-            d.update({'ref': list(ref), 't': time.time(), 'range': float(hm.range)})
-            self.maps = {key: d}               # one blank at a time
-            save_maps(self.maps)
+            self.remember_map(spec, hm, ref, lv.z0, tag)     # one blank at a time
         self.post(('map', hm.xs, hm.ys, [list(map(float, r)) for r in hm.z], hm.range))
         if self.g.noise_events:
             self.post(('log', f'Probe noise filtered: {self.g.noise_events} events so far (readings re-checked). Many '
@@ -1514,8 +1556,8 @@ def autotest(app):
     def later():
         if not app.connected:
             return app.root.after(200, later)
-        for r, p in files.items():
-            app.set_file(r, p, save=False)
+        for r in ('traces', 'holes', 'cutout'):
+            app.set_file(r, files.get(r, ''), save=False)
         sim = app.m.sim
         m0 = list(sim.m)
         c = app.canvas
