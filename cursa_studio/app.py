@@ -28,7 +28,7 @@ RUNS = os.path.join(HOME, 'runs')
 SETTINGS = os.path.join(HOME, 'settings.json')
 DEFAULTS = {'copper_w': 102.0, 'copper_h': 71.0, 'backlash_x': 0.0, 'backlash_y': 0.0, 'spindle': 1000.0,
             'grid': 10.0, 'margin': 1.5, 'jog_xy_feed': 1500.0, 'jog_z_feed': 500.0, 'last_dir': '',
-            'traces': '', 'holes': '', 'cutout': '', 'shortcut_asked': False}
+            'traces': '', 'holes': '', 'cutout': '', 'shortcut_asked': False, 'kbd_jog': True}
 STEPS = (10.0, 1.0, 0.1)
 
 ERR_HINT = {
@@ -787,8 +787,14 @@ class App:
         grid.columnconfigure(0, weight=1)
         grid.columnconfigure(1, weight=1)
 
-        jog = ttk.LabelFrame(left, text='Jog  (keyboard)')
+        jog = ttk.LabelFrame(left, text='Jog')
         jog.pack(fill='x', pady=6)
+        kf = ttk.Frame(jog)
+        kf.pack(fill='x', padx=6, pady=(6, 0))
+        self.kbd_btn = tk.Button(kf, text='', command=self.toggle_kbd, takefocus=0, relief='flat',
+                                 font=('Segoe UI', 10, 'bold'), width=24)
+        self.kbd_btn.pack(fill='x')
+        self.update_kbd()
         sf = ttk.Frame(jog)
         sf.pack(fill='x', padx=6, pady=(6, 2))
         ttk.Label(sf, text='STEP').pack(side='left')
@@ -807,7 +813,7 @@ class App:
         jb('Y-', 'Y', -1).grid(row=2, column=1, pady=2)
         jb('Z+', 'Z', 1).grid(row=0, column=4, padx=(18, 0))
         jb('Z-', 'Z', -1).grid(row=2, column=4, padx=(18, 0))
-        ttk.Label(jog, text='Arrows: X / Y     Z key: Z up     X key: Z down\nSPACE: step 10 / 1 / 0.1     ESC: STOP',
+        ttk.Label(jog, text='Arrows: X / Y     Z key: Z up     X key: Z down\nSPACE: step 10 / 1 / 0.1     ESC: STOP (always)',
                   foreground=DIM, font=('Segoe UI', 9), justify='center').pack(pady=(0, 6))
         self.jog_msg = ttk.Label(left, text='', foreground='#ffd54f', wraplength=290)
         self.jog_msg.pack(fill='x')
@@ -976,6 +982,8 @@ class App:
         if ks == 'Escape':
             self.stop()
             return 'break'
+        if not self.s.get('kbd_jog', True):
+            return None                       # keyboard jog off (Esc still stops)
         if ks in self.keys_down:
             return 'break'
         keymap = {'Left': ('X', -1), 'Right': ('X', 1), 'Up': ('Y', 1), 'Down': ('Y', -1), 'z': ('Z', 1),
@@ -991,6 +999,19 @@ class App:
             self.jog(*keymap[ks])
             return 'break'
         return None
+
+    def toggle_kbd(self):
+        self.s['kbd_jog'] = not self.s.get('kbd_jog', True)
+        save_settings(self.s)
+        self.update_kbd()
+        self.canvas.focus_set()
+
+    def update_kbd(self):
+        on = self.s.get('kbd_jog', True)
+        self.kbd_btn.configure(text='KEYBOARD JOG: ON  (click to turn off)' if on else
+                               'KEYBOARD JOG: OFF  (click to turn on)',
+                               bg='#1b8a3a' if on else '#555', fg='white', activebackground='#22a547' if on else '#666',
+                               activeforeground='white')
 
     def on_key_up(self, e):
         self.keys_down.discard(e.keysym)
@@ -1496,6 +1517,16 @@ def autotest(app):
         time.sleep(0.5)
         app.root.update()
         app.keytest = [round(a - b, 3) for a, b in zip(sim.m, m0)] + [app.step_var.get()]
+        app.toggle_kbd()
+        m1 = list(sim.m)
+        for ks in ('Right', 'Up', 'z'):
+            c.event_generate(f'<KeyPress-{ks}>', when='tail')
+            c.event_generate(f'<KeyRelease-{ks}>', when='tail')
+        app.root.update()
+        time.sleep(0.4)
+        app.root.update()
+        app.keytest.append('off_moved' if sim.m != m1 else 'off_ok')
+        app.toggle_kbd()
         if os.environ.get('CURSA_MAPTEST'):
             app.start_maptest()
         else:
