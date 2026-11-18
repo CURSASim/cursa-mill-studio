@@ -589,9 +589,9 @@ class Leveler:
             zm = self._probe_retry(target, self.fm)
             if zm is None:
                 continue
-            vals = []
+            vals = [zm]                    # the fast touch is reading 1; one agreeing fine touch confirms it
             for _ in range(7):
-                self.g.cmd(f'G0 Z{min([zm] + vals) - self.z0 + 0.2:.4f}')
+                self.g.cmd(f'G0 Z{min(vals) - self.z0 + 0.2:.4f}')
                 zf = self._probe_retry(target, self.fine_feed)
                 if zf is None:
                     break
@@ -621,7 +621,7 @@ class Leveler:
         self.z0 = zc_machine - z_work
         self.g.cmd(f'G10 L2 P1 Z{self.z0:.4f}')
 
-    def grid(self, bounds, spacing=10.0, residual_max=0.02, range_max=0.6):
+    def grid(self, bounds, spacing=10.0, residual_max=0.04, range_max=1.0, range_warn=0.4):
         x0, y0, x1, y1 = bounds
         nx = max(2, math.ceil((x1 - x0) / spacing) + 1)
         ny = max(2, math.ceil((y1 - y0) / spacing) + 1)
@@ -650,18 +650,30 @@ class Leveler:
 
         print(f'probing {nx} x {ny} = {nx * ny} points over X {x0:.1f}..{x1:.1f}, Y {y0:.1f}..{y1:.1f}')
         hm = build(xs, ys)
-        cells = [((xs[i] + xs[i + 1]) / 2, (ys[j] + ys[j + 1]) / 2)
-                 for i in range(0, nx - 1, max(1, (nx - 1) // 3)) for j in range(0, ny - 1, max(1, (ny - 1) // 2))]
-        res = max(abs(get(x, y) - hm(x, y)) for x, y in cells)
+        if hm.range > range_max:              # fail fast, before spending time on refinement
+            raise GrblError(f'height range {hm.range:.2f} mm > {range_max}: the blank is not seated (lift it, clean '
+                            'under it, re-clamp) or badly bowed')
+        # spot-check cell centres; refine ONLY the columns / rows whose cells miss. 40 um on a 0.08 deep V cut changes
+        # the groove width by ~0.01 mm, so a smaller miss is not worth the probing time.
+        ci = sorted(set(list(range(0, nx - 1, max(1, (nx - 1) // 3))) + [nx - 2]))
+        cj = sorted(set(list(range(0, ny - 1, max(1, (ny - 1) // 2))) + [ny - 2]))
+        miss = {}
+        for i in ci:
+            for j in cj:
+                x, y = (xs[i] + xs[i + 1]) / 2, (ys[j] + ys[j + 1]) / 2
+                miss[(i, j)] = abs(get(x, y) - hm(x, y))
+        res = max(miss.values())
         print(f'map range {hm.range:.3f} mm, worst cell-centre error {res * 1000:.0f} um')
-        if res > residual_max:
-            xs2 = sorted(set(xs + [(a + b) / 2 for a, b in zip(xs, xs[1:])]))
-            ys2 = sorted(set(ys + [(a + b) / 2 for a, b in zip(ys, ys[1:])]))
-            print(f'refining to {len(xs2)} x {len(ys2)}')
+        if hm.range > range_warn:
+            print(f'NOTE: the copper is {hm.range:.2f} mm out of flat: compensated, but check the blank is clamped down')
+        bad = [k for k, v in miss.items() if v > residual_max]
+        if bad:
+            bi = {i for i, _ in bad}
+            bj = {j for _, j in bad}
+            xs2 = sorted(set(xs + [(xs[i] + xs[i + 1]) / 2 for i in bi]))
+            ys2 = sorted(set(ys + [(ys[j] + ys[j + 1]) / 2 for j in bj]))
+            print(f'refining {len(bi)} column(s) / {len(bj)} row(s): {len(xs2)} x {len(ys2)}')
             hm = build(xs2, ys2)
-        if hm.range > range_max:
-            raise GrblError(f'height range {hm.range:.2f} mm > {range_max}: blank not seated (corner + cams) or badly '
-                            'bowed')
         self.g.cmd(f'G0 Z{top + 5:.3f}')
         return hm
 

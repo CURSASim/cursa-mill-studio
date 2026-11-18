@@ -465,7 +465,7 @@ class Machine(threading.Thread):
         nx = max(2, math.ceil((bounds[2] - bounds[0]) / spec['grid']) + 1)
         ny = max(2, math.ceil((bounds[3] - bounds[1]) / spec['grid']) + 1)
         total = nx * ny
-        self.post(('log', f'Mapping {nx} x {ny} = {total} points (each point: fast touch + 2 confirming touches)...'))
+        self.post(('log', f'Mapping {nx} x {ny} = {total} points (each point: fast touch + 1 confirming touch, more only if they disagree)...'))
         orig = cj.Leveler.touch
         count = [0]
 
